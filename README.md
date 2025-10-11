@@ -80,7 +80,7 @@ Get the project running in under 5 minutes! Requires Node.js 18+, Python 3.12+, 
    - Toggle favorite and check /favorites.
    - Errors? Check backend logs for API/DB issues.
 
-### Environment Variables
+## Environment Variables
 See .env.example (backend) and .env.local.example (frontend) for templates:
   ```bash
     DATABASE_URL: # NeonDB connection string (required).
@@ -88,7 +88,7 @@ See .env.example (backend) and .env.local.example (frontend) for templates:
     NEXT_PUBLIC_API_URL: # Backend base URL (e.g., http://localhost:8000 locally).
   ```
 
-### 📚 API Reference
+## 📚 API Reference
 Secure, typed endpoints with Pydantic validation. All responses in JSON.
   | Method | Endpoint | Description |
   |--------|----------|-------------|
@@ -100,14 +100,14 @@ Secure, typed endpoints with Pydantic validation. All responses in JSON.
   - Error Responses: Standard HTTP codes (400: Bad Request, 404: Not Found, 409: Duplicate Symbol, 500: Server Error).
   - Rate Limiting: Built-in delays for Alpha Vantage compliance.
 
-### 🔮 Future Enhancements
+## 🔮 Future Enhancements
   - Real-Time Updates: Integrate WebSockets (e.g., Socket.io) for instant price pushes.
   - Price History Charts: Add Recharts for line graphs of daily trends.
   - User Auth: JWT sessions for multi-user portfolios.
   - More Assets: Expand to international stocks or commodities with additional APIs.
   - Mobile App: React Native wrapper for on-the-go tracking.
 
-### 🤝 Contributing
+## 🤝 Contributing
 Pull requests welcome! Fork the repo, create a feature branch (git checkout -b feature/amazing-feature), and submit a PR. Focus on clean code, tests, and docs.
 1. Fork & clone.
 2. Install deps and run locally.
