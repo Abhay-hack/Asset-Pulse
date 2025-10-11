@@ -4,3 +4,4 @@ pydantic
 asyncpg==0.30.0
 python-dotenv
 aiohttp
+yfinance==0.2.40

@@ -6,10 +6,12 @@ import os
 import aiohttp
 import asyncio
 import logging
+import yfinance as yf
 from dotenv import load_dotenv
 from functools import wraps
 import time
 from datetime import datetime
+from contextlib import asynccontextmanager
 import asyncpg  # New: Async PostgreSQL driver
 
 load_dotenv()
@@ -154,8 +156,10 @@ US_STOCKS = {
     'NFLX', 'BABA', 'AMD', 'GOOG', 'JPM', 'V', 'JNJ'
 }
 
+import yfinance as yf  # Add import at top
+
 async def fetch_live_price(session: aiohttp.ClientSession, symbol: str, max_retries: int = 3) -> float | None:
-    """Fetch live price in INR using Alpha Vantage for US stocks or CoinGecko for crypto."""
+    """Fetch live price in INR using Alpha Vantage (primary) or yfinance (fallback) for US stocks or CoinGecko for crypto."""
     symbol_upper = symbol.upper()
     is_crypto = symbol_upper in CRYPTO_MAP
 
@@ -167,12 +171,21 @@ async def fetch_live_price(session: aiohttp.ClientSession, symbol: str, max_retr
         logger.warning(f"Unsupported stock symbol (US only): {symbol}")
         return None
 
+    # Try Alpha first
+    alpha_price = await _fetch_alpha_price(session, symbol, max_retries)
+    if alpha_price:
+        return alpha_price
+
+    # Fallback to yfinance (unlimited)
+    logger.info(f"Alpha limited; falling back to yfinance for {symbol}")
+    return await _fetch_yfinance_price(symbol)
+
+async def _fetch_alpha_price(session: aiohttp.ClientSession, symbol: str, max_retries: int = 3) -> float | None:
+    """Alpha Vantage fetch with retries."""
     if not ALPHA_VANTAGE_KEY:
-        logger.warning("No ALPHA_VANTAGE_KEY; skipping stock fetch")
         return None
 
-    ticker_sym = symbol_upper  # Plain ticker for US
-
+    ticker_sym = symbol.upper()
     for attempt in range(max_retries):
         try:
             url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker_sym}&apikey={ALPHA_VANTAGE_KEY}"
@@ -185,19 +198,19 @@ async def fetch_live_price(session: aiohttp.ClientSession, symbol: str, max_retr
                     if raw_price > 0:
                         usd_to_inr = await get_usd_to_inr_rate(session)
                         price = raw_price * usd_to_inr
-                        logger.info(f"Fetched US stock {symbol} (ticker: {ticker_sym}): ₹{price}")
+                        logger.info(f"Fetched US stock {symbol} via Alpha: ₹{price}")
                         return price
 
-            # Rate limit check
-            text = await resp.text()
-            if 'Note' in text or 'limit' in text.lower() or 'Invalid API call' in text:
-                if attempt < max_retries - 1:
-                    delay = 60 * (2 ** attempt)  # 1min backoff
-                    logger.warning(f"Alpha Vantage limited for {symbol} (attempt {attempt+1}), waiting {delay}s")
-                    await asyncio.sleep(delay)
-                    continue
+                # Rate limit check
+                text = await resp.text()
+                if 'Note' in text or 'limit' in text.lower() or 'Invalid API call' in text:
+                    if attempt < max_retries - 1:
+                        delay = 60 * (2 ** attempt)  # 1min backoff
+                        logger.warning(f"Alpha Vantage limited for {symbol} (attempt {attempt+1}), waiting {delay}s")
+                        await asyncio.sleep(delay)
+                        continue
 
-            return None
+                return None
         except Exception as e:
             error_str = str(e).lower()
             if any(lim in error_str for lim in ['limit', '429', 'too many', 'invalid api']):
@@ -206,8 +219,26 @@ async def fetch_live_price(session: aiohttp.ClientSession, symbol: str, max_retr
                     logger.warning(f"Rate limited for {symbol} (attempt {attempt+1}), waiting {delay}s")
                     await asyncio.sleep(delay)
                     continue
-            logger.error(f"Failed to fetch {symbol} (ticker: {ticker_sym}): {e}")
+            logger.error(f"Failed Alpha fetch for {symbol}: {e}")
             return None
+
+async def _fetch_yfinance_price(symbol: str) -> float | None:
+    """Fallback yfinance fetch (sync, wrapped async)."""
+    try:
+        # Run sync yfinance in thread to avoid blocking
+        loop = asyncio.get_event_loop()
+        raw_price = await loop.run_in_executor(None, lambda: yf.Ticker(symbol).history(period="1d")['Close'].iloc[-1])
+        if raw_price > 0:
+            # yfinance prices in USD; convert to INR (reuse session if needed, but simple)
+            # Note: For simplicity, use cached USD-INR or fetch (add session param if needed)
+            usd_to_inr = 83.5  # Fallback; integrate get_usd_to_inr_rate if session passed
+            price = raw_price * usd_to_inr
+            logger.info(f"Fetched US stock {symbol} via yfinance: ₹{price}")
+            return price
+        return None
+    except Exception as e:
+        logger.error(f"yfinance fetch error for {symbol}: {e}")
+        return None
 
 async def _fetch_crypto_price(session: aiohttp.ClientSession, symbol: str) -> float | None:
     """Fallback CoinGecko for crypto (USD → INR)."""
