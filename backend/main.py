@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List
@@ -112,7 +112,10 @@ def db_retry(max_retries=3):
         return wrapper
     return decorator
 
-def should_fetch_price(symbol: str) -> bool:
+def should_fetch_price(symbol: str, refresh: bool = False) -> bool:
+    if not refresh:
+        # If no refresh, use cached or stored without API call
+        return False
     reset_daily_counter()
     if daily_calls >= DAILY_LIMIT:
         logger.warning(f"Daily quota neared ({daily_calls}/{DAILY_LIMIT}); skipping {symbol}")
@@ -156,9 +159,7 @@ US_STOCKS = {
     'NFLX', 'BABA', 'AMD', 'GOOG', 'JPM', 'V', 'JNJ'
 }
 
-import yfinance as yf  # Add import at top
-
-async def fetch_live_price(session: aiohttp.ClientSession, symbol: str, max_retries: int = 3) -> float | None:
+async def fetch_live_price(session: aiohttp.ClientSession, symbol: str, max_retries: int = 3, refresh: bool = False) -> float | None:
     """Fetch live price in INR using Alpha Vantage (primary) or yfinance (fallback) for US stocks or CoinGecko for crypto."""
     symbol_upper = symbol.upper()
     is_crypto = symbol_upper in CRYPTO_MAP
@@ -264,9 +265,10 @@ async def _fetch_crypto_price(session: aiohttp.ClientSession, symbol: str) -> fl
         return None
 
 # /assets endpoint (sequential with delays)
+# /assets endpoint (sequential with delays)
 @app.get("/assets", response_model=List[Asset])
 @db_retry()
-async def get_assets():
+async def get_assets(refresh: bool = Query(default=False)):
     reset_daily_counter()
     assets = []
     async with aiohttp.ClientSession() as session:
@@ -287,8 +289,8 @@ async def get_assets():
 
                 symbol_upper = symbol.upper()
                 live_price = None
-                if should_fetch_price(symbol):
-                    live_price = await fetch_live_price(session, symbol)
+                if should_fetch_price(symbol, refresh):
+                    live_price = await fetch_live_price(session, symbol, refresh=refresh)
                     if live_price and symbol_upper not in CRYPTO_MAP:  # Count Alpha calls only
                         global daily_calls
                         daily_calls += 1
@@ -313,7 +315,7 @@ async def get_assets():
                 )
 
                 # Delay only if fetching Alpha
-                if i < len(rows) - 1 and symbol_upper not in CRYPTO_MAP and should_fetch_price(symbol):
+                if i < len(rows) - 1 and symbol_upper not in CRYPTO_MAP and should_fetch_price(symbol, refresh):
                     await asyncio.sleep(15)
 
             return assets
@@ -325,9 +327,10 @@ async def get_assets():
                 await db_pool.release(conn)
 
 # /favorites (same as /assets but filtered)
+# /favorites (same as /assets but filtered)
 @app.get("/favorites", response_model=List[Asset])
 @db_retry()
-async def get_favorites():
+async def get_favorites(refresh: bool = Query(default=False)):
     reset_daily_counter()
     favorites = []
     async with aiohttp.ClientSession() as session:
@@ -348,8 +351,8 @@ async def get_favorites():
 
                 symbol_upper = symbol.upper()
                 live_price = None
-                if should_fetch_price(symbol):
-                    live_price = await fetch_live_price(session, symbol)
+                if should_fetch_price(symbol, refresh):
+                    live_price = await fetch_live_price(session, symbol, refresh=refresh)
                     if live_price and symbol_upper not in CRYPTO_MAP:
                         global daily_calls
                         daily_calls += 1
@@ -372,7 +375,7 @@ async def get_favorites():
                     )
                 )
 
-                if i < len(rows) - 1 and symbol_upper not in CRYPTO_MAP and should_fetch_price(symbol):
+                if i < len(rows) - 1 and symbol_upper not in CRYPTO_MAP and should_fetch_price(symbol, refresh):
                     await asyncio.sleep(15)
 
             return favorites
@@ -382,7 +385,7 @@ async def get_favorites():
         finally:
             if conn and db_pool:
                 await db_pool.release(conn)
-
+                
 # Other endpoints
 @app.get("/")
 async def root():

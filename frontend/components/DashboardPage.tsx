@@ -24,11 +24,11 @@ const DashboardPage: React.FC = () => {
   const [sort, setSort] = useState<"" | "name" | "price" | "favorites">("");
   const [darkMode, setDarkMode] = useState(true); // Default to dark for glassmorphism
 
-  // Fetch assets
+  // Fetch assets from DB only (no live API update)
   const fetchAssets = async () => {
     setLoading(true);
     try {
-      const res = await fetch(`${API_URL}/assets`);
+      const res = await fetch(`${API_URL}/assets?refresh=false`);
       if (!res.ok) {
         throw new Error(`HTTP error! status: ${res.status}`);
       }
@@ -41,10 +41,22 @@ const DashboardPage: React.FC = () => {
     setLoading(false);
   };
 
-  // Refresh handler for live prices
+  // Refresh handler: Fetch with live API updates
   const refreshAssets = useCallback(async () => {
-    await fetchAssets();
-    toast.success("Assets refreshed with latest prices!");
+    setLoading(true);
+    try {
+      const res = await fetch(`${API_URL}/assets?refresh=true`);
+      if (!res.ok) {
+        throw new Error(`HTTP error! status: ${res.status}`);
+      }
+      const data = await res.json();
+      setAssets(data);
+      toast.success("Assets refreshed with latest prices!");
+    } catch (error) {
+      console.error("Refresh error:", error);
+      toast.error("Failed to refresh prices");
+    }
+    setLoading(false);
   }, []);
 
   useEffect(() => {
@@ -63,7 +75,8 @@ const DashboardPage: React.FC = () => {
         setAssets(prev => [newAsset, ...prev]);
         setShowForm(false);
         toast.success("Asset added successfully!");
-        refreshAssets();  // Optional: Refresh to check live price
+        // Optional: Auto-refresh after add to check live price
+        // refreshAssets();
       } else {
         const errorData = await res.json();
         toast.error(errorData.detail || "Failed to add asset");
