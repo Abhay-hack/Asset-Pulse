@@ -18,6 +18,10 @@ A sleek full-stack web application for tracking financial assets like US stocks 
 - **Data Persistence**: All assets stored in a scalable Postgres database (NeonDB) with unique symbols to prevent duplicates.
 - **Error-Resilient**: Handles API rate limits, invalid symbols, and DB errors gracefully (e.g., falls back to stored prices).
 - **Responsive UI**: Tailwind CSS for mobile-first design—works seamlessly on desktop, tablet, or phone.
+  ### 🕐 API Data Delay Notice  
+  > ⚠️ **Note:** The stock and crypto data may take **5–10 minutes** to update.  
+  > This delay is due to **external API rate limits** and the app’s **caching mechanism** (to avoid hitting daily API quotas).  
+  > If you don’t see updated prices immediately, wait a few minutes — data will refresh automatically.
 
 ## 🛠 Tech Stack
 | Component | Technology | Purpose |
