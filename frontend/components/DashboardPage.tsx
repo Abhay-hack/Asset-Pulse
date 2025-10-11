@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import AssetCard from "./AssetCard";
 import AddAssetForm from "./AddAssetForm";
 import toast, { Toaster } from "react-hot-toast";
@@ -29,13 +29,23 @@ const DashboardPage: React.FC = () => {
     setLoading(true);
     try {
       const res = await fetch(`${API_URL}/assets`);
+      if (!res.ok) {
+        throw new Error(`HTTP error! status: ${res.status}`);
+      }
       const data = await res.json();
       setAssets(data);
     } catch (error) {
+      console.error("Fetch error:", error);
       toast.error("Failed to fetch assets");
     }
     setLoading(false);
   };
+
+  // Refresh handler for live prices
+  const refreshAssets = useCallback(async () => {
+    await fetchAssets();
+    toast.success("Assets refreshed with latest prices!");
+  }, []);
 
   useEffect(() => {
     fetchAssets();
@@ -53,8 +63,13 @@ const DashboardPage: React.FC = () => {
         setAssets(prev => [newAsset, ...prev]);
         setShowForm(false);
         toast.success("Asset added successfully!");
+        refreshAssets();  // Optional: Refresh to check live price
+      } else {
+        const errorData = await res.json();
+        toast.error(errorData.detail || "Failed to add asset");
       }
-    } catch {
+    } catch (error) {
+      console.error("Add asset error:", error);
       toast.error("Failed to add asset");
     }
   };
@@ -68,8 +83,13 @@ const DashboardPage: React.FC = () => {
             asset.id === id ? { ...asset, is_favorite: !asset.is_favorite } : asset
           )
         );
+        toast.success("Favorite toggled!");
+      } else {
+        const errorData = await res.json();
+        toast.error(errorData.detail || "Failed to update favorite");
       }
-    } catch {
+    } catch (error) {
+      console.error("Toggle favorite error:", error);
       toast.error("Failed to update favorite");
     }
   };
@@ -103,7 +123,7 @@ const DashboardPage: React.FC = () => {
           </h1>
         </div>
 
-        {/* Search & Sort */}
+        {/* Search & Sort + Refresh */}
         <div className="relative z-10 flex flex-col sm:flex-row gap-4 mb-6 animate-slide-up">
           <input
             type="text"
@@ -122,6 +142,13 @@ const DashboardPage: React.FC = () => {
             <option value="price" className="bg-slate-800 text-white">Price</option>
             <option value="favorites" className="bg-slate-800 text-white">Favorites</option>
           </select>
+          <button
+            onClick={refreshAssets}
+            disabled={loading}
+            className="px-4 py-3 rounded-xl border border-white/20 bg-white/10 backdrop-blur-md focus:ring-2 focus:ring-cyan-400/50 focus:border-cyan-400 transition-all duration-300 text-white sm:w-auto w-full sm:w-1/4 disabled:opacity-50"
+          >
+            {loading ? "Loading..." : "🔄 Refresh"}
+          </button>
         </div>
 
         {/* Asset cards */}

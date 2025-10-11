@@ -1,7 +1,8 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import AssetCard from "../../components/AssetCard";
+import toast from "react-hot-toast";
 
 type Asset = {
   id: number;
@@ -16,16 +17,29 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 const FavoritesPage: React.FC = () => {
   const [favorites, setFavorites] = useState<Asset[]>([]);
+  const [loading, setLoading] = useState(true);
 
   const fetchFavorites = async () => {
+    setLoading(true);
     try {
       const res = await fetch(`${API_URL}/favorites`);
+      if (!res.ok) {
+        throw new Error(`HTTP error! status: ${res.status}`);
+      }
       const data = await res.json();
       setFavorites(data);
     } catch (error) {
-      console.error("Failed to fetch favorites", error);
+      console.error("Fetch favorites error:", error);
+      toast.error("Failed to fetch favorites");
     }
+    setLoading(false);
   };
+
+  // Refresh handler for live prices
+  const refreshFavorites = useCallback(async () => {
+    await fetchFavorites();
+    toast.success("Favorites refreshed with latest prices!");
+  }, []);
 
   useEffect(() => {
     fetchFavorites();
@@ -38,9 +52,14 @@ const FavoritesPage: React.FC = () => {
       });
       if (res.ok) {
         setFavorites((prev) => prev.filter((asset) => asset.id !== id));
+        toast.success("Removed from favorites!");
+      } else {
+        const errorData = await res.json();
+        toast.error(errorData.detail || "Failed to toggle favorite");
       }
     } catch (error) {
-      console.error("Failed to toggle favorite", error);
+      console.error("Toggle favorite error:", error);
+      toast.error("Failed to toggle favorite");
     }
   };
 
@@ -51,11 +70,18 @@ const FavoritesPage: React.FC = () => {
         <div className="absolute inset-0 bg-gradient-to-r from-cyan-500/5 to-blue-500/5 animate-shimmer"></div>
 
         <div className="relative z-10">
-          {/* Header */}
+          {/* Header + Refresh */}
           <div className="flex flex-col sm:flex-row justify-between items-center mb-6 gap-4 animate-fade-in">
             <h1 className="text-3xl font-bold bg-gradient-to-r from-cyan-400 to-blue-400 bg-clip-text text-transparent tracking-wide">
               Favorites
             </h1>
+            <button
+              onClick={refreshFavorites}
+              disabled={loading}
+              className="px-4 py-2 bg-white/10 backdrop-blur-md border border-white/20 rounded-xl hover:bg-white/20 transition-all duration-300 text-white text-sm font-medium disabled:opacity-50"
+            >
+              {loading ? "Loading..." : "🔄 Refresh"}
+            </button>
           </div>
 
           {favorites.length === 0 ? (
