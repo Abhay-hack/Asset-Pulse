@@ -82,11 +82,11 @@ Get the project running in under 5 minutes! Requires Node.js 18+, Python 3.12+, 
 
 ### Environment Variables
 See .env.example (backend) and .env.local.example (frontend) for templates:
-```bash
-  DATABASE_URL: NeonDB connection string (required).
-  ALPHA_VANTAGE_KEY: Free API key for US stocks (optional; crypto fallback works without).
-  NEXT_PUBLIC_API_URL: Backend base URL (e.g., http://localhost:8000 locally).
-```
+  ```bash
+    DATABASE_URL: # NeonDB connection string (required).
+    ALPHA_VANTAGE_KEY: # Free API key for US stocks (optional; crypto fallback works without).
+    NEXT_PUBLIC_API_URL: # Backend base URL (e.g., http://localhost:8000 locally).
+  ```
 
 ### 📚 API Reference
 Secure, typed endpoints with Pydantic validation. All responses in JSON.
