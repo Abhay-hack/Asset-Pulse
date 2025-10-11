@@ -2,12 +2,15 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List
-import psycopg2
 import os
 import aiohttp
 import asyncio
 import logging
 from dotenv import load_dotenv
+from functools import wraps
+import time
+from datetime import datetime
+import asyncpg  # New: Async PostgreSQL driver
 
 load_dotenv()
 
@@ -28,8 +31,13 @@ app.add_middleware(
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_KEY")
+NEON_ENDPOINT_ID = os.getenv("NEON_ENDPOINT_ID")
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL is not set in .env")
+
+# Append Neon endpoint for SNI/SSL stability if provided
+if 'neon.tech' in DATABASE_URL and NEON_ENDPOINT_ID:
+    DATABASE_URL += f"?options=endpoint%3D{NEON_ENDPOINT_ID}&sslmode=require"
 
 # Pydantic models (unchanged)
 class Asset(BaseModel):
@@ -46,9 +54,73 @@ class AssetCreate(BaseModel):
     price: float
     is_favorite: bool = False
 
-# Helper: get DB connection per request
-def get_connection():
-    return psycopg2.connect(DATABASE_URL, sslmode="require")
+# Global price cache: {symbol: (price, timestamp)}
+price_cache = {}
+CACHE_TTL = 300  # 5 minutes
+
+# Daily call counter (reset at midnight UTC)
+daily_calls = 0
+last_reset = datetime.utcnow().date()
+DAILY_LIMIT = 20  # Buffer under 25
+
+def reset_daily_counter():
+    global daily_calls, last_reset
+    today = datetime.utcnow().date()
+    if today > last_reset:
+        daily_calls = 0
+        last_reset = today
+
+# Async DB Pool
+db_pool = None
+
+async def init_db_pool():
+    global db_pool
+    db_pool = await asyncpg.create_pool(
+        DATABASE_URL,
+        min_size=1,
+        max_size=5,
+        command_timeout=60,
+        server_settings={'application_name': 'asset-pulse'},
+    )
+
+@app.on_event("startup")
+async def startup():
+    await init_db_pool()
+    reset_daily_counter()
+
+async def get_connection():
+    if not db_pool:
+        await init_db_pool()
+    return await db_pool.acquire()
+
+def db_retry(max_retries=3):
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            for attempt in range(max_retries):
+                try:
+                    return await func(*args, **kwargs)
+                except (asyncpg.exceptions.ConnectionDoesNotExistError, asyncpg.exceptions._base.InterfaceError) as e:
+                    if "SSL connection has been closed" in str(e) and attempt < max_retries - 1:
+                        logger.warning(f"DB SSL retry {attempt+1}/{max_retries}: {e}")
+                        await asyncio.sleep(2 ** attempt)  # Backoff
+                        continue
+                    raise
+            return None
+        return wrapper
+    return decorator
+
+def should_fetch_price(symbol: str) -> bool:
+    reset_daily_counter()
+    if daily_calls >= DAILY_LIMIT:
+        logger.warning(f"Daily quota neared ({daily_calls}/{DAILY_LIMIT}); skipping {symbol}")
+        return False
+    now = time.time()
+    cached = price_cache.get(symbol.upper())
+    if cached and now - cached[1] < CACHE_TTL:
+        logger.info(f"Using cached price for {symbol}")
+        return False
+    return True
 
 # Async USD to INR converter (free, daily rate)
 async def get_usd_to_inr_rate(session: aiohttp.ClientSession) -> float:
@@ -76,49 +148,33 @@ CRYPTO_MAP = {
     'ADA': 'cardano',
 }
 
-# Common US stocks (expand as needed)
+# Common US stocks
 US_STOCKS = {
     'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'NVDA', 'META', 
     'NFLX', 'BABA', 'AMD', 'GOOG', 'JPM', 'V', 'JNJ'
 }
 
-# Updated live price fetch with Alpha Vantage GLOBAL_QUOTE
 async def fetch_live_price(session: aiohttp.ClientSession, symbol: str, max_retries: int = 3) -> float | None:
-    """Fetch live price in INR using Alpha Vantage GLOBAL_QUOTE (NSE/BSE/US) or CoinGecko (crypto)."""
-    if not ALPHA_VANTAGE_KEY:
-        logger.warning("No ALPHA_VANTAGE_KEY; using CoinGecko fallback for crypto only")
-        if symbol.upper() in CRYPTO_MAP:
-            return await _fetch_crypto_price(session, symbol)
-        return None
-
+    """Fetch live price in INR using Alpha Vantage for US stocks or CoinGecko for crypto."""
     symbol_upper = symbol.upper()
     is_crypto = symbol_upper in CRYPTO_MAP
 
     if is_crypto:
         return await _fetch_crypto_price(session, symbol)
 
-    # Determine ticker_sym and exchange
-    if symbol_upper.endswith(('.NS', '.NSE')):
-        ticker_sym = symbol_upper
-        exchange = 'NSE'
-        is_indian = True
-    elif symbol_upper.endswith('.BSE'):
-        ticker_sym = symbol_upper
-        exchange = 'BSE'
-        is_indian = True
-    elif symbol_upper in US_STOCKS or (len(symbol_upper) <= 5 and symbol_upper.isalpha() and symbol_upper not in {'TCS', 'HDFC', 'INFY'}):  # Avoid common short Indian; expand US_STOCKS better in prod
-        ticker_sym = symbol_upper
-        exchange = 'NASDAQ'
-        is_indian = False
-    else:
-        # Assume NSE for other alpha symbols
-        ticker_sym = f"{symbol_upper}.NSE"
-        exchange = 'NSE'
-        is_indian = True
+    # For US stocks only
+    if symbol_upper not in US_STOCKS:
+        logger.warning(f"Unsupported stock symbol (US only): {symbol}")
+        return None
+
+    if not ALPHA_VANTAGE_KEY:
+        logger.warning("No ALPHA_VANTAGE_KEY; skipping stock fetch")
+        return None
+
+    ticker_sym = symbol_upper  # Plain ticker for US
 
     for attempt in range(max_retries):
         try:
-            # Async HTTP for GLOBAL_QUOTE
             url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker_sym}&apikey={ALPHA_VANTAGE_KEY}"
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status == 200:
@@ -127,15 +183,12 @@ async def fetch_live_price(session: aiohttp.ClientSession, symbol: str, max_retr
                     raw_price_str = quote.get('05. price', '0')
                     raw_price = float(raw_price_str) if raw_price_str else 0
                     if raw_price > 0:
-                        if is_indian:
-                            price = raw_price  # Direct INR for NSE/BSE
-                        else:  # US: Convert to INR
-                            usd_to_inr = await get_usd_to_inr_rate(session)
-                            price = raw_price * usd_to_inr
-                        logger.info(f"Fetched {symbol} ({exchange}, ticker: {ticker_sym}): ₹{price}")
+                        usd_to_inr = await get_usd_to_inr_rate(session)
+                        price = raw_price * usd_to_inr
+                        logger.info(f"Fetched US stock {symbol} (ticker: {ticker_sym}): ₹{price}")
                         return price
 
-            # Rate limit check (Alpha returns 'Note' or error in text)
+            # Rate limit check
             text = await resp.text()
             if 'Note' in text or 'limit' in text.lower() or 'Invalid API call' in text:
                 if attempt < max_retries - 1:
@@ -181,180 +234,222 @@ async def _fetch_crypto_price(session: aiohttp.ClientSession, symbol: str) -> fl
 
 # /assets endpoint (sequential with delays)
 @app.get("/assets", response_model=List[Asset])
+@db_retry()
 async def get_assets():
+    reset_daily_counter()
     assets = []
     async with aiohttp.ClientSession() as session:
+        conn = None
         try:
-            with get_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT id, name, symbol, price, is_favorite, created_at FROM assets ORDER BY id DESC"
+            conn = await get_connection()
+            rows = await conn.fetch(
+                "SELECT id, name, symbol, price, is_favorite, created_at FROM assets ORDER BY id DESC"
+            )
+
+            for i, r in enumerate(rows):
+                asset_id = int(r['id'])
+                name = r['name']
+                symbol = r['symbol']
+                stored_price = float(r['price'])
+                is_favorite = r['is_favorite']
+                created_at = r['created_at']
+
+                symbol_upper = symbol.upper()
+                live_price = None
+                if should_fetch_price(symbol):
+                    live_price = await fetch_live_price(session, symbol)
+                    if live_price and symbol_upper not in CRYPTO_MAP:  # Count Alpha calls only
+                        global daily_calls
+                        daily_calls += 1
+                    if live_price:
+                        price_cache[symbol_upper] = (live_price, time.time())
+                        await conn.execute("UPDATE assets SET price = $1 WHERE id = $2", live_price, asset_id)
+                        logger.info(f"Updated {symbol} to ₹{live_price}")
+
+                # Use live or cached or stored
+                cached_price, _ = price_cache.get(symbol_upper, (stored_price, 0))
+                price = live_price or cached_price
+
+                assets.append(
+                    Asset(
+                        id=asset_id,
+                        name=name,
+                        symbol=symbol,
+                        price=price,
+                        is_favorite=is_favorite,
+                        created_at=str(created_at),
                     )
-                    rows = cur.fetchall()
-                    
-                    for i, r in enumerate(rows):
-                        asset_id, name, symbol, stored_price, is_favorite, created_at = r
-                        
-                        live_price = await fetch_live_price(session, symbol)
-                        if live_price:
-                            with get_connection() as update_conn:
-                                with update_conn.cursor() as update_cur:
-                                    update_cur.execute("UPDATE assets SET price = %s WHERE id = %s", (live_price, asset_id))
-                                    update_conn.commit()
-                            logger.info(f"Updated {symbol} to ₹{live_price}")
-                            price = live_price
-                        else:
-                            price = float(stored_price)
-                        
-                        assets.append(
-                            Asset(
-                                id=asset_id,
-                                name=name,
-                                symbol=symbol,
-                                price=price,
-                                is_favorite=is_favorite,
-                                created_at=str(created_at),
-                            )
-                        )
-                        
-                        # 15s delay (Alpha: 5/min = 12s; buffer for safety)
-                        if i < len(rows) - 1:
-                            await asyncio.sleep(15)
-            
+                )
+
+                # Delay only if fetching Alpha
+                if i < len(rows) - 1 and symbol_upper not in CRYPTO_MAP and should_fetch_price(symbol):
+                    await asyncio.sleep(15)
+
             return assets
-        except psycopg2.Error as e:
-            logger.error(f"DB error in get_assets: {e}")
-            raise HTTPException(status_code=500, detail="Failed to fetch assets")
         except Exception as e:
-            logger.error(f"Unexpected error in get_assets: {e}")
-            raise HTTPException(status_code=500, detail="Internal server error")
+            logger.error(f"Error in get_assets: {e}")
+            raise HTTPException(status_code=500, detail="Failed to fetch assets")
+        finally:
+            if conn and db_pool:
+                await db_pool.release(conn)
 
 # /favorites (same as /assets but filtered)
 @app.get("/favorites", response_model=List[Asset])
+@db_retry()
 async def get_favorites():
+    reset_daily_counter()
     favorites = []
     async with aiohttp.ClientSession() as session:
+        conn = None
         try:
-            with get_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT id, name, symbol, price, is_favorite, created_at FROM assets WHERE is_favorite=true ORDER BY id DESC"
-                    )
-                    rows = cur.fetchall()
-                    
-                    for i, r in enumerate(rows):
-                        asset_id, name, symbol, stored_price, is_favorite, created_at = r
-                        
-                        live_price = await fetch_live_price(session, symbol)
-                        if live_price:
-                            with get_connection() as update_conn:
-                                with update_conn.cursor() as update_cur:
-                                    update_cur.execute("UPDATE assets SET price = %s WHERE id = %s", (live_price, asset_id))
-                                    update_conn.commit()
-                            price = live_price
-                        else:
-                            price = float(stored_price)
-                        
-                        favorites.append(
-                            Asset(
-                                id=asset_id,
-                                name=name,
-                                symbol=symbol,
-                                price=price,
-                                is_favorite=is_favorite,
-                                created_at=str(created_at),
-                            )
-                        )
-                        
-                        if i < len(rows) - 1:
-                            await asyncio.sleep(15)
-            
-            return favorites
-        except psycopg2.Error as e:
-            logger.error(f"DB error in get_favorites: {e}")
-            raise HTTPException(status_code=500, detail="Failed to fetch favorites")
-        except Exception as e:
-            logger.error(f"Unexpected error in get_favorites: {e}")
-            raise HTTPException(status_code=500, detail="Internal server error")
+            conn = await get_connection()
+            rows = await conn.fetch(
+                "SELECT id, name, symbol, price, is_favorite, created_at FROM assets WHERE is_favorite=true ORDER BY id DESC"
+            )
 
-# Other endpoints unchanged (root, health, post, patch)
+            for i, r in enumerate(rows):
+                asset_id = int(r['id'])
+                name = r['name']
+                symbol = r['symbol']
+                stored_price = float(r['price'])
+                is_favorite = r['is_favorite']
+                created_at = r['created_at']
+
+                symbol_upper = symbol.upper()
+                live_price = None
+                if should_fetch_price(symbol):
+                    live_price = await fetch_live_price(session, symbol)
+                    if live_price and symbol_upper not in CRYPTO_MAP:
+                        global daily_calls
+                        daily_calls += 1
+                    if live_price:
+                        price_cache[symbol_upper] = (live_price, time.time())
+                        await conn.execute("UPDATE assets SET price = $1 WHERE id = $2", live_price, asset_id)
+                        logger.info(f"Updated {symbol} to ₹{live_price}")
+
+                cached_price, _ = price_cache.get(symbol_upper, (stored_price, 0))
+                price = live_price or cached_price
+
+                favorites.append(
+                    Asset(
+                        id=asset_id,
+                        name=name,
+                        symbol=symbol,
+                        price=price,
+                        is_favorite=is_favorite,
+                        created_at=str(created_at),
+                    )
+                )
+
+                if i < len(rows) - 1 and symbol_upper not in CRYPTO_MAP and should_fetch_price(symbol):
+                    await asyncio.sleep(15)
+
+            return favorites
+        except Exception as e:
+            logger.error(f"Error in get_favorites: {e}")
+            raise HTTPException(status_code=500, detail="Failed to fetch favorites")
+        finally:
+            if conn and db_pool:
+                await db_pool.release(conn)
+
+# Other endpoints
 @app.get("/")
-def root():
+async def root():
     return {"message": "Backend is running", "endpoints": ["/health", "/assets", "/favorites"]}
 
 @app.get("/health")
-def health():
+@db_retry()
+async def health():
     try:
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1")
-                return {"status": "ok", "db": "connected"}
+        conn = await get_connection()
+        await conn.fetchval("SELECT 1")
+        await db_pool.release(conn)
+        return {"status": "ok", "db": "connected"}
     except Exception as e:
         logger.error(f"Health check failed: {e}")
         return {"status": "error", "message": str(e)}
 
 @app.post("/assets", response_model=Asset)
-def add_asset(asset: AssetCreate):
+@db_retry()
+async def add_asset(asset: AssetCreate):
     if not asset.name.strip() or not asset.symbol.strip() or asset.price <= 0:
         raise HTTPException(status_code=400, detail="Invalid input: name/symbol required, price > 0")
+    conn = None
     try:
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO assets (name, symbol, price, is_favorite) VALUES (%s, %s, %s, %s) RETURNING id, name, symbol, price, is_favorite, created_at",
-                    (asset.name.strip(), asset.symbol.strip().upper(), asset.price, asset.is_favorite),
-                )
-                new_asset = cur.fetchone()
-                if not new_asset:
-                    raise HTTPException(status_code=500, detail="Failed to insert asset")
-                conn.commit()
-                return Asset(
-                    id=new_asset[0],
-                    name=new_asset[1],
-                    symbol=new_asset[2],
-                    price=float(new_asset[3]),
-                    is_favorite=new_asset[4],
-                    created_at=str(new_asset[5]),
-                )
-    except psycopg2.IntegrityError as e:
+        conn = await get_connection()
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                INSERT INTO assets (name, symbol, price, is_favorite) 
+                VALUES ($1, $2, $3, $4) 
+                RETURNING id, name, symbol, price, is_favorite, created_at
+                """,
+                asset.name.strip(),
+                asset.symbol.strip().upper(),
+                asset.price,
+                asset.is_favorite,
+            )
+        if not row:
+            raise HTTPException(status_code=500, detail="Failed to insert asset")
+        return Asset(
+            id=int(row['id']),
+            name=row['name'],
+            symbol=row['symbol'],
+            price=float(row['price']),
+            is_favorite=row['is_favorite'],
+            created_at=str(row['created_at']),
+        )
+    except asyncpg.exceptions.UniqueViolationError as e:
         logger.error(f"Integrity error (duplicate symbol): {e}")
         raise HTTPException(status_code=409, detail="Symbol already exists")
-    except psycopg2.Error as e:
+    except asyncpg.exceptions.PostgresError as e:
         logger.error(f"DB error in add_asset: {e}")
         raise HTTPException(status_code=500, detail="Failed to add asset")
     except Exception as e:
         logger.error(f"Unexpected error in add_asset: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+    finally:
+        if conn and db_pool:
+            await db_pool.release(conn)
+
 
 @app.patch("/assets/{asset_id}/favorite", response_model=Asset)
-def toggle_favorite(asset_id: int):
+@db_retry()
+async def toggle_favorite(asset_id: int):
     try:
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT is_favorite FROM assets WHERE id=%s", (asset_id,))
-                row = cur.fetchone()
-                if not row:
-                    raise HTTPException(status_code=404, detail="Asset not found")
-                new_fav = not row[0]
-                cur.execute(
-                    "UPDATE assets SET is_favorite=%s WHERE id=%s RETURNING id, name, symbol, price, is_favorite, created_at",
-                    (new_fav, asset_id),
-                )
-                updated = cur.fetchone()
-                if not updated:
-                    raise HTTPException(status_code=500, detail="Failed to update asset")
-                conn.commit()
-                return Asset(
-                    id=updated[0],
-                    name=updated[1],
-                    symbol=updated[2],
-                    price=float(updated[3]),
-                    is_favorite=updated[4],
-                    created_at=str(updated[5]),
-                )
-    except psycopg2.Error as e:
+        conn = await get_connection()
+        row = await conn.fetchrow("SELECT is_favorite FROM assets WHERE id=$1", asset_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Asset not found")
+        new_fav = not row['is_favorite']
+        updated = await conn.fetchrow(
+            """
+            UPDATE assets SET is_favorite=$1 WHERE id=$2 
+            RETURNING id, name, symbol, price, is_favorite, created_at
+            """,
+            new_fav,
+            asset_id,
+        )
+        await conn.commit()
+        await db_pool.release(conn)
+        if not updated:
+            raise HTTPException(status_code=500, detail="Failed to update asset")
+        return Asset(
+            id=int(updated['id']),
+            name=updated['name'],
+            symbol=updated['symbol'],
+            price=float(updated['price']),
+            is_favorite=updated['is_favorite'],
+            created_at=str(updated['created_at']),
+        )
+    except asyncpg.exceptions.PostgresError as e:
         logger.error(f"DB error in toggle_favorite: {e}")
         raise HTTPException(status_code=500, detail="Failed to toggle favorite")
     except Exception as e:
         logger.error(f"Unexpected error in toggle_favorite: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.on_event("shutdown")
+async def shutdown():
+    if db_pool:
+        await db_pool.close()

@@ -1,10 +1,6 @@
 fastapi
-uvicorn
+uvicorn[standard]
 pydantic
-psycopg2-binary
+asyncpg==0.30.0
 python-dotenv
 aiohttp
-yfinance==0.2.40
-requests==2.31.0
-asyncio
-alpha-vantage==2.3.1
