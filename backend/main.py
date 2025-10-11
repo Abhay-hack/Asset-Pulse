@@ -178,7 +178,7 @@ async def fetch_live_price(session: aiohttp.ClientSession, symbol: str, max_retr
 
     # Fallback to yfinance (unlimited)
     logger.info(f"Alpha limited; falling back to yfinance for {symbol}")
-    return await _fetch_yfinance_price(symbol)
+    return await _fetch_yfinance_price(session, symbol)
 
 async def _fetch_alpha_price(session: aiohttp.ClientSession, symbol: str, max_retries: int = 3) -> float | None:
     """Alpha Vantage fetch with retries."""
@@ -222,16 +222,16 @@ async def _fetch_alpha_price(session: aiohttp.ClientSession, symbol: str, max_re
             logger.error(f"Failed Alpha fetch for {symbol}: {e}")
             return None
 
-async def _fetch_yfinance_price(symbol: str) -> float | None:
+async def _fetch_yfinance_price(session: aiohttp.ClientSession, symbol: str) -> float | None:
     """Fallback yfinance fetch (sync, wrapped async)."""
     try:
         # Run sync yfinance in thread to avoid blocking
         loop = asyncio.get_event_loop()
-        raw_price = await loop.run_in_executor(None, lambda: yf.Ticker(symbol).history(period="1d")['Close'].iloc[-1])
-        if raw_price > 0:
-            # yfinance prices in USD; convert to INR (reuse session if needed, but simple)
-            # Note: For simplicity, use cached USD-INR or fetch (add session param if needed)
-            usd_to_inr = 83.5  # Fallback; integrate get_usd_to_inr_rate if session passed
+        ticker = await loop.run_in_executor(None, lambda: yf.Ticker(symbol))
+        # Use 'regularMarketPrice' for current price (more reliable than history)
+        raw_price = ticker.info.get('regularMarketPrice') or ticker.info.get('currentPrice')
+        if raw_price and raw_price > 0:
+            usd_to_inr = await get_usd_to_inr_rate(session)
             price = raw_price * usd_to_inr
             logger.info(f"Fetched US stock {symbol} via yfinance: ₹{price}")
             return price
