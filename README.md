@@ -47,7 +47,7 @@ Get the project running in under 5 minutes! Requires Node.js 18+, Python 3.12+, 
 2. **Set Up Backend** (FastAPI):
      ```bash
      cd backend
-     pip install -r requirements.txt  # Installs fastapi, uvicorn, psycopg2-binary, etc.
+     pip install -r requirements.txt  #install fastapi,uvicorn,pydantic,psycopg2-binary,python-dotenv,aiohttp,yfinance==0.2.40,requests==2.31.0,asyncio,alpha-vantage==2.3.1
      cp .env.example .env
      ```
     - Backend runs at `http://localhost:8000`. Test with `/docs` for Swagger.
