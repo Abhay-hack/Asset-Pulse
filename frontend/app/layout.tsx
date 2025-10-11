@@ -1,13 +1,14 @@
+import type { Metadata } from "next";
+import { Inter } from "next/font/google";
 import "./globals.css";
 import Navbar from "../components/Navbar";
 import Footer from "../components/Footer";
 
-export const metadata = {
-  title: "Asset Tracker",
-  description: "Frontend",
-  icons: {
-    icon: "/asset.png",
-  },
+const inter = Inter({ subsets: ["latin"] });
+
+export const metadata: Metadata = {
+  title: "Asset Pulse",
+  description: "Track your assets with ease",
 };
 
 export default function RootLayout({
@@ -16,10 +17,12 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
-      <body className="bg-gray-100 flex flex-col min-h-screen">
+    <html lang="en" className="h-full">
+      <body className={`${inter.className} h-full overflow-x-hidden bg-gradient-to-br from-slate-900 via-indigo-900 to-purple-900 text-white`}>
         <Navbar />
-        <main className="flex-grow">{children}</main>
+        <main className="pt-16 pb-0 min-h-[calc(100vh-4rem)] flex flex-col">
+          {children}
+        </main>
         <Footer />
       </body>
     </html>
